@@ -285,37 +285,40 @@ module ZK
 
         def handle_losing_election(our_idx, ballots)
           @mutex.synchronize { return if @closed }
-
           @leader = false
+          watch_next_ballot(our_idx, ballots)
 
           on_leader_ack do
             fire_losing_callbacks!
+            watch_next_ballot(our_idx, ballots)
+          end
+        end
 
-            next_ballot = File.join(root_vote_path, ballots[our_idx - 1])
+        def watch_next_ballot(our_idx, ballots)
+          next_ballot = File.join(root_vote_path, ballots[our_idx - 1])
 
-            logger.info { "ZK: following #{next_ballot} for changes, #{@data.inspect}" }
+          logger.info { "ZK: following #{next_ballot} for changes, #{@data.inspect}" }
 
-            @next_node_ballot_sub ||= @zk.register(next_ballot) do |event| 
-              if event.node_deleted? 
-                logger.debug { "#{next_ballot} was deleted, voting, #{@data.inspect}" }
+          @next_node_ballot_sub ||= @zk.register(next_ballot) do |event|
+            if event.node_deleted?
+              logger.debug { "#{next_ballot} was deleted, voting, #{@data.inspect}" }
+              @zk.defer { vote! }
+            else
+              # this takes care of the race condition where the leader ballot would
+              # have been deleted before we could re-register to receive updates
+              # if zk.stat returns false, it means the path was deleted
+              unless @zk.exists?(next_ballot, :watch => true)
+                logger.debug { "#{next_ballot} was deleted (detected on re-watch), voting, #{@data.inspect}" }
                 @zk.defer { vote! }
-              else
-                # this takes care of the race condition where the leader ballot would
-                # have been deleted before we could re-register to receive updates
-                # if zk.stat returns false, it means the path was deleted
-                unless @zk.exists?(next_ballot, :watch => true)
-                  logger.debug { "#{next_ballot} was deleted (detected on re-watch), voting, #{@data.inspect}" }
-                  @zk.defer { vote! }
-                end
               end
             end
+          end
 
-            # this catches a possible race condition, where the leader has died before
-            # our callback has fired. In this case, retry and do this procedure again
-            unless @zk.stat(next_ballot, :watch => true).exists?
-              logger.debug { "#{@data.inspect}: the node #{next_ballot} did not exist, retrying" }
-              @zk.defer { vote! }
-            end
+          # this catches a possible race condition, where the leader has died before
+          # our callback has fired. In this case, retry and do this procedure again
+          unless @zk.stat(next_ballot, :watch => true).exists?
+            logger.debug { "#{@data.inspect}: the node #{next_ballot} did not exist, retrying" }
+            @zk.defer { vote! }
           end
         end
 
