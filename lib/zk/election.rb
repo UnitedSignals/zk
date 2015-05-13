@@ -58,7 +58,7 @@ module ZK
     DEFAULT_OPTS = {
       :root_election_node => ROOT_NODE,
     }.freeze
- 
+
     class Base
      include Logging
 
@@ -91,7 +91,7 @@ module ZK
       def leader_ack_path
         @leader_ack_path ||= "#{root_vote_path}/leader_ack"
       end
-     
+
       def cast_ballot!(data)
         return if @vote_path
         create_root_path!
@@ -99,12 +99,12 @@ module ZK
       rescue Exceptions::NoNode
         retry
       end
-      
+
       # has the leader acknowledged their role?
       def leader_acked?(watch=false)
         @zk.exists?(leader_ack_path, :watch => watch)
       end
-      
+
       # return the data from the current leader or nil if there is no current leader
       def leader_data
         @zk.get(leader_ack_path).first
@@ -192,10 +192,10 @@ module ZK
         super(client, name, opts)
         opts = DEFAULT_OPTS.merge(opts)
 
-        @leader     = nil 
+        @leader     = nil
         @data       = opts[:data] || ''
         @vote_path  = nil
-       
+
         @winner_callbacks = []
         @loser_callbacks = []
 
@@ -210,7 +210,7 @@ module ZK
       def voted? #:nodoc:
         !@leader.nil?
       end
-      
+
       # When we win the election, we will call the procs registered using this
       # method.
       def on_winning_election(&block)
@@ -247,7 +247,7 @@ module ZK
       private
         # the inauguration, as it were
         def acknowledge_win!
-          @zk.create(leader_ack_path, @data, :ephemeral => true) 
+          @zk.create(leader_ack_path, @data, :ephemeral => true)
         rescue Exceptions::NodeExists
         end
 
@@ -266,7 +266,7 @@ module ZK
           ballots = get_ballots()
 
           our_idx = ballots.index(vote_basename)
-          
+
           if our_idx == 0           # if we have the lowest number
             logger.info { "ZK: We have become leader, data: #{@data.inspect}" }
             handle_winning_election
@@ -278,7 +278,7 @@ module ZK
 
         def handle_winning_election
           @mutex.synchronize { return if @closed }
-          @leader = true  
+          @leader = true
           fire_winning_callbacks!
           acknowledge_win!
         end
@@ -295,21 +295,25 @@ module ZK
         end
 
         def watch_next_ballot(our_idx, ballots)
+          clear_next_node_ballot_sub!
+
           next_ballot = File.join(root_vote_path, ballots[our_idx - 1])
 
           logger.info { "ZK: following #{next_ballot} for changes, #{@data.inspect}" }
 
-          @next_node_ballot_sub ||= @zk.register(next_ballot) do |event|
-            if event.node_deleted?
-              logger.debug { "#{next_ballot} was deleted, voting, #{@data.inspect}" }
-              @zk.defer { vote! }
-            else
-              # this takes care of the race condition where the leader ballot would
-              # have been deleted before we could re-register to receive updates
-              # if zk.stat returns false, it means the path was deleted
-              unless @zk.exists?(next_ballot, :watch => true)
-                logger.debug { "#{next_ballot} was deleted (detected on re-watch), voting, #{@data.inspect}" }
+          @mutex.synchronize do
+            @next_node_ballot_sub ||= @zk.register(next_ballot) do |event|
+              if event.node_deleted?
+                logger.debug { "#{next_ballot} was deleted, voting, #{@data.inspect}" }
                 @zk.defer { vote! }
+              else
+                # this takes care of the race condition where the leader ballot would
+                # have been deleted before we could re-register to receive updates
+                # if zk.stat returns false, it means the path was deleted
+                unless @zk.exists?(next_ballot, :watch => true)
+                  logger.debug { "#{next_ballot} was deleted (detected on re-watch), voting, #{@data.inspect}" }
+                  @zk.defer { vote! }
+                end
               end
             end
           end
@@ -323,9 +327,11 @@ module ZK
         end
 
         def clear_next_node_ballot_sub!
-          if @next_node_ballot_sub
-            @next_node_ballot_sub.unsubscribe 
-            @next_node_ballot_sub = nil
+          @mutex.synchronize do
+            if @next_node_ballot_sub
+              @next_node_ballot_sub.unsubscribe
+              @next_node_ballot_sub = nil
+            end
           end
         end
 
@@ -366,24 +372,24 @@ module ZK
 
       def observe!
         synchronize do
-          return if @observing 
+          return if @observing
           @observing = true
 
           @leader_ack_sub ||= @zk.register(leader_ack_path) do |event|
             logger.debug { "leader_ack_callback, event.node_deleted? #{event.node_deleted?}, event.node_created? #{event.node_created?}" }
 
             if event.node_deleted?
-              the_king_is_dead 
+              the_king_is_dead
             elsif event.node_created?
               long_live_the_king
             else
-              acked = leader_acked?(true) 
+              acked = leader_acked?(true)
 
 
               # If the current state of the system is not what we think it should be
               # a transition has occurred and we should fire our callbacks
               if (acked and !@leader_alive)
-                long_live_the_king 
+                long_live_the_king
               elsif (!acked and @leader_alive)
                 the_king_is_dead
               else
