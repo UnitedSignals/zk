@@ -295,34 +295,45 @@ module ZK
         end
 
         def watch_next_ballot(our_idx, ballots)
-          clear_next_node_ballot_sub!
+          if ballots.any?
+            clear_next_node_ballot_sub!
 
-          next_ballot = File.join(root_vote_path, ballots[our_idx - 1])
+            ballot_idx = if our_idx
+                           our_idx - 1
+                         else
+                           logger.warn { 'our ballot vanished, following ballot #0' }
+                           0
+                         end
 
-          logger.info { "ZK: following #{next_ballot} for changes, #{@data.inspect}" }
+            next_ballot = File.join(root_vote_path, ballots[ballot_idx])
 
-          @mutex.synchronize do
-            @next_node_ballot_sub ||= @zk.register(next_ballot) do |event|
-              if event.node_deleted?
-                logger.debug { "#{next_ballot} was deleted, voting, #{@data.inspect}" }
-                @zk.defer { vote! }
-              else
-                # this takes care of the race condition where the leader ballot would
-                # have been deleted before we could re-register to receive updates
-                # if zk.stat returns false, it means the path was deleted
-                unless @zk.exists?(next_ballot, :watch => true)
-                  logger.debug { "#{next_ballot} was deleted (detected on re-watch), voting, #{@data.inspect}" }
+            logger.info { "ZK: following #{next_ballot} for changes, #{@data.inspect}" }
+
+            @mutex.synchronize do
+              @next_node_ballot_sub ||= @zk.register(next_ballot) do |event|
+                if event.node_deleted?
+                  logger.debug { "#{next_ballot} was deleted, voting, #{@data.inspect}" }
                   @zk.defer { vote! }
+                else
+                  # this takes care of the race condition where the leader ballot would
+                  # have been deleted before we could re-register to receive updates
+                  # if zk.stat returns false, it means the path was deleted
+                  unless @zk.exists?(next_ballot, :watch => true)
+                    logger.debug { "#{next_ballot} was deleted (detected on re-watch), voting, #{@data.inspect}" }
+                    @zk.defer { vote! }
+                  end
                 end
               end
             end
-          end
 
-          # this catches a possible race condition, where the leader has died before
-          # our callback has fired. In this case, retry and do this procedure again
-          unless @zk.stat(next_ballot, :watch => true).exists?
-            logger.debug { "#{@data.inspect}: the node #{next_ballot} did not exist, retrying" }
-            @zk.defer { vote! }
+            # this catches a possible race condition, where the leader has died before
+            # our callback has fired. In this case, retry and do this procedure again
+            unless @zk.stat(next_ballot, :watch => true).exists?
+              logger.debug { "#{@data.inspect}: the node #{next_ballot} did not exist, retrying" }
+              @zk.defer { vote! }
+            end
+          else
+            logger.warn { 'no ballots available, cannot subscribe' }
           end
         end
 
